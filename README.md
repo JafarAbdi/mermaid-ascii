@@ -28,6 +28,13 @@ Binary: `target/x86_64-unknown-linux-musl/release/mermaid-ascii`.
 
 `render` also returns styled `ratatui::text::Line` values for TUI use and plain Unicode lines for CLI use.
 
-## Acknowledgment
+## Origin and differences
 
 Terminal renderer adapted from [xAI's `grok-build`](https://github.com/xai-org/grok-build/tree/c68e39f60462f28d9be5e683d9cbe2c57b1a5027), licensed under Apache-2.0.
+
+Compared with that revision, this package:
+
+- extracts the terminal renderer into a standalone library and stdin/file CLI;
+- targets a fully static musl binary;
+- normalizes long forward edges with bounded, invisible Sugiyama routing points instead of exterior back-edge lanes;
+- excludes the markdown streaming, pager UI, PNG worker/cache, and settings integration.
