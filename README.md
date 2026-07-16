@@ -9,6 +9,10 @@ mermaid-ascii diagram.mmd
 
 Supported: flowchart, sequence, state, class, and entity-relationship diagrams. Unsupported syntax is shown in a framed source fallback.
 
+## Examples
+
+[`examples/`](examples/) contains the [grok-mermaid](https://tools.simonwillison.net/grok-mermaid) examples. Render one with `mermaid-ascii examples/flowchart.mmd`.
+
 ## Build
 
 The checked-in Cargo config targets static x86-64 Linux with musl:

@@ -1,0 +1,8 @@
+sequenceDiagram
+  participant U as User
+  participant B as Browser
+  participant W as WASM module
+  U->>B: Edit mermaid source
+  B->>W: wasm_render_html()
+  W-->>B: Unicode box art
+  B-->>U: Rendered diagram
