@@ -2865,11 +2865,7 @@ fn draw_box(canvas: &mut Canvas, p: &Placed, lines: &[String], shape: Shape) {
 
 fn route_forward(canvas: &mut Canvas, from: &Placed, to: &Placed, edge: &Edge, bus: usize) {
     let tx = to.cx;
-    let bx = if from.cx.abs_diff(tx) <= 1 {
-        tx
-    } else {
-        from.cx
-    };
+    let bx = from.cx;
     let by = from.y + from.h - 1;
     let head_row = to.y - 1;
 
@@ -4411,6 +4407,25 @@ mod tests {
             !out.contains('◄'),
             "forward edge became a back edge:\n{out}"
         );
+    }
+
+    #[test]
+    fn routing_points_stay_connected_when_centers_differ_by_one() {
+        let out = plain(
+            "graph TD\n B -- hit --> BC[Backend cached] --> D\n B -- miss --> B1[Lint] --> B2[Unit] --> B3[Integration] --> B4[Build] --> D",
+        );
+        assert!(
+            out.contains("            │   ┌─────────────┐\n            │   │ Integration │"),
+            "routing point shifted away from its incoming edge:\n{out}"
+        );
+    }
+
+    #[test]
+    fn shared_source_uses_one_stem() {
+        let out =
+            plain("graph TD\n S([Commit]) --> A[Frontend]\n S --> B[Backend]\n S --> C[Docs]");
+        let commit_bottom = out.lines().find(|line| line.contains('╰')).unwrap();
+        assert_eq!(commit_bottom.matches('┬').count(), 1, "{out}");
     }
 
     #[test]
