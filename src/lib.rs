@@ -52,6 +52,8 @@ const LABEL_BREAK_CHARS: [char; 4] = ['_', '-', '.', '/'];
 const CONT: char = '\u{0}';
 const MAX_NODES: usize = 128;
 const MAX_EDGES: usize = 512;
+/// Layout-only points inserted into skipped ranks; excess falls back to source.
+const MAX_ROUTING_POINTS: usize = 4096;
 const MAX_GROUPS: usize = 24;
 const MAX_GROUP_DEPTH: usize = 6;
 const MAX_CANVAS_CELLS: usize = 1 << 21;
@@ -152,6 +154,7 @@ enum LineKind {
     Thick,
 }
 
+#[derive(Clone)]
 struct Edge {
     from: usize,
     to: usize,
@@ -1790,31 +1793,91 @@ enum NodeExtra {
     Compartments(Vec<Vec<String>>),
 }
 
+struct ExpandedLayout {
+    ranks: Vec<usize>,
+    edges: Vec<Edge>,
+}
+
+fn expand_forward_edges(graph: &Graph, real_ranks: &[usize]) -> Result<ExpandedLayout, Oversize> {
+    let routing_points = graph.edges.iter().try_fold(0usize, |total, edge| {
+        let span = real_ranks[edge.to].saturating_sub(real_ranks[edge.from]);
+        total.checked_add(span.saturating_sub(1))
+    });
+    let Some(routing_points) = routing_points else {
+        return Err(Oversize::Cells);
+    };
+    if routing_points > MAX_ROUTING_POINTS {
+        return Err(Oversize::Cells);
+    }
+
+    let mut ranks = Vec::with_capacity(real_ranks.len() + routing_points);
+    ranks.extend_from_slice(real_ranks);
+    let mut edges = Vec::with_capacity(graph.edges.len() + routing_points);
+    for edge in &graph.edges {
+        let from_rank = real_ranks[edge.from];
+        let to_rank = real_ranks[edge.to];
+        if to_rank <= from_rank + 1 {
+            edges.push(edge.clone());
+            continue;
+        }
+
+        let mut from = edge.from;
+        let mut head_from = edge.head_from;
+        for rank in from_rank + 1..to_rank {
+            let point = ranks.len();
+            ranks.push(rank);
+            edges.push(Edge {
+                from,
+                to: point,
+                label: None,
+                head_to: Head::None,
+                head_from,
+                line: edge.line,
+            });
+            from = point;
+            head_from = Head::None;
+        }
+        edges.push(Edge {
+            from,
+            to: edge.to,
+            label: edge.label.clone(),
+            head_to: edge.head_to,
+            head_from: Head::None,
+            line: edge.line,
+        });
+    }
+    debug_assert_eq!(ranks.len(), real_ranks.len() + routing_points);
+    debug_assert_eq!(edges.len(), graph.edges.len() + routing_points);
+    Ok(ExpandedLayout { ranks, edges })
+}
+
 fn layout_canvas(
     graph: &Graph,
     extras: &[NodeExtra],
     max_width: Option<usize>,
 ) -> Result<Canvas, Oversize> {
-    let n = graph.nodes.len();
-    if n == 0 {
+    let real_nodes = graph.nodes.len();
+    if real_nodes == 0 {
         return Err(Oversize::Cells);
     }
 
-    let ranks = compute_ranks(graph);
-    let max_rank = *ranks.iter().max().unwrap_or(&0);
+    let real_ranks = compute_ranks(graph);
+    let layout = expand_forward_edges(graph, &real_ranks)?;
+    let n = layout.ranks.len();
+    let max_rank = *layout.ranks.iter().max().unwrap_or(&0);
 
     let mut by_rank: Vec<Vec<usize>> = vec![Vec::new(); max_rank + 1];
-    for (idx, &r) in ranks.iter().enumerate() {
-        by_rank[r].push(idx);
+    for (index, &rank) in layout.ranks.iter().enumerate() {
+        by_rank[rank].push(index);
     }
-    order_ranks(&mut by_rank, &graph.edges, &ranks);
+    order_ranks(&mut by_rank, &layout.edges, &layout.ranks);
 
     let wrapped: Vec<Vec<String>> = graph
         .nodes
         .iter()
         .map(|node| wrap_label(&node.label, WRAP_WIDTH, MAX_LINES))
         .collect();
-    let mut box_w: Vec<usize> = (0..n)
+    let mut box_w: Vec<usize> = (0..real_nodes)
         .map(|i| match &extras[i] {
             NodeExtra::Frame(sub) => {
                 let title_w = fit_label(&graph.nodes[i].label, WRAP_WIDTH).width();
@@ -1843,7 +1906,7 @@ fn layout_canvas(
             }
         })
         .collect();
-    let box_h: Vec<usize> = (0..n)
+    let mut box_h: Vec<usize> = (0..real_nodes)
         .map(|i| match &extras[i] {
             NodeExtra::Frame(sub) => sub.h + 2,
             NodeExtra::Compartments(sections) => {
@@ -1853,10 +1916,12 @@ fn layout_canvas(
             NodeExtra::Plain => wrapped[i].len() + 2,
         })
         .collect();
+    box_w.resize(n, 1);
+    box_h.resize(n, 1);
 
     let mut extra_h = vec![0usize; n];
     let mut self_label_w = vec![0usize; n];
-    for e in &graph.edges {
+    for e in &layout.edges {
         if e.from == e.to {
             extra_h[e.from] = 2;
             if let Some(l) = &e.label {
@@ -1905,9 +1970,23 @@ fn layout_canvas(
     // stays readable) into the bottom-up / right-to-left orientation.
     let vertical = matches!(graph.dir, Dir::Down | Dir::Up);
     let plan = if vertical {
-        place_td(&ranks, max_rank, &by_rank, &sizes, graph, &mut placed)
+        place_td(
+            &layout.ranks,
+            max_rank,
+            &by_rank,
+            &sizes,
+            &layout.edges,
+            &mut placed,
+        )
     } else {
-        place_lr(&ranks, max_rank, &by_rank, &sizes, graph, &mut placed)
+        place_lr(
+            &layout.ranks,
+            max_rank,
+            &by_rank,
+            &sizes,
+            &layout.edges,
+            &mut placed,
+        )
     };
     let (canvas_w, canvas_h) = plan.canvas;
 
@@ -1921,7 +2000,7 @@ fn layout_canvas(
     }
 
     let mut canvas = Canvas::new(canvas_w, canvas_h);
-    for idx in 0..n {
+    for idx in 0..real_nodes {
         match &extras[idx] {
             NodeExtra::Frame(sub) => {
                 draw_frame(&mut canvas, &placed[idx], &graph.nodes[idx].label, sub)
@@ -1937,7 +2016,7 @@ fn layout_canvas(
             ),
         }
     }
-    for (i, edge) in graph.edges.iter().enumerate() {
+    for (i, edge) in layout.edges.iter().enumerate() {
         canvas.cur_style = match edge.line {
             LineKind::Solid => STY_SOLID,
             LineKind::Dotted => STY_DOT,
@@ -1948,27 +2027,14 @@ fn layout_canvas(
             continue;
         }
         let (from, to) = (&placed[edge.from], &placed[edge.to]);
+        let adjacent = to.rank == from.rank + 1;
         let bus = plan.band_end[from.rank] + plan.edge_bus[i];
         let lane = plan.lane_base + plan.edge_lane[i];
-        match (vertical, route_kind(from.rank, to.rank)) {
-            (true, RouteKind::AdjacentForward) => route_forward(&mut canvas, from, to, edge, bus),
-            (true, RouteKind::LongForward) => {
-                let (exit, entry) = plan.edge_gutters[i].expect("long edge has gutters");
-                route_long_forward(&mut canvas, from, to, edge, exit, entry, lane);
-            }
-            (true, RouteKind::Backward | RouteKind::Lateral) => {
-                route_back(&mut canvas, from, to, edge, lane)
-            }
-            (false, RouteKind::AdjacentForward) => {
-                route_forward_lr(&mut canvas, from, to, edge, bus)
-            }
-            (false, RouteKind::LongForward) => {
-                let (exit, entry) = plan.edge_gutters[i].expect("long edge has gutters");
-                route_long_forward_lr(&mut canvas, from, to, edge, exit, entry, lane);
-            }
-            (false, RouteKind::Backward | RouteKind::Lateral) => {
-                route_back_lr(&mut canvas, from, to, edge, lane)
-            }
+        match (vertical, adjacent) {
+            (true, true) => route_forward(&mut canvas, from, to, edge, bus),
+            (true, false) => route_back(&mut canvas, from, to, edge, lane),
+            (false, true) => route_forward_lr(&mut canvas, from, to, edge, bus),
+            (false, false) => route_back_lr(&mut canvas, from, to, edge, lane),
         }
     }
 
@@ -2185,14 +2251,13 @@ fn draw_frame(canvas: &mut Canvas, p: &Placed, title: &str, sub: &Canvas) {
 }
 
 fn bus_spans_td(
-    graph: &Graph,
+    edges: &[Edge],
     ranks: &[usize],
     centers: &[usize],
     r: usize,
     exact: bool,
 ) -> Vec<(usize, usize, usize, usize, usize)> {
-    graph
-        .edges
+    edges
         .iter()
         .enumerate()
         .filter(|(_, e)| {
@@ -2211,91 +2276,13 @@ fn bus_spans_td(
         .collect()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RouteKind {
-    AdjacentForward,
-    LongForward,
-    Backward,
-    Lateral,
-}
-
-fn route_kind(from_rank: usize, to_rank: usize) -> RouteKind {
-    if to_rank == from_rank + 1 {
-        RouteKind::AdjacentForward
-    } else if to_rank > from_rank {
-        RouteKind::LongForward
-    } else if to_rank < from_rank {
-        RouteKind::Backward
-    } else {
-        RouteKind::Lateral
-    }
-}
-
-#[derive(Clone, Copy)]
-struct EdgeGutters {
-    start_gap: usize,
-    start_slot: usize,
-    end_gap: usize,
-    end_slot: usize,
-}
-
-struct GutterPlan {
-    edges: Vec<Option<EdgeGutters>>,
-    gap_tracks: Vec<usize>,
-}
-
-fn plan_gutters(graph: &Graph, ranks: &[usize], max_rank: usize) -> GutterPlan {
-    let mut edges = vec![None; graph.edges.len()];
-    let mut gap_tracks = vec![0usize; max_rank];
-    for (index, edge) in graph.edges.iter().enumerate() {
-        let from_rank = ranks[edge.from];
-        let to_rank = ranks[edge.to];
-        if route_kind(from_rank, to_rank) != RouteKind::LongForward {
-            continue;
-        }
-        let start_gap = from_rank;
-        let end_gap = to_rank - 1;
-        let start_slot = gap_tracks[start_gap];
-        gap_tracks[start_gap] += 1;
-        let end_slot = gap_tracks[end_gap];
-        gap_tracks[end_gap] += 1;
-        let gutters = EdgeGutters {
-            start_gap,
-            start_slot,
-            end_gap,
-            end_slot,
-        };
-        edges[index] = Some(gutters);
-    }
-    GutterPlan { edges, gap_tracks }
-}
-
-fn gutter_coordinates(
-    gutters: &GutterPlan,
-    band_end: &[usize],
-    bus_tracks: &[usize],
-) -> Vec<Option<(usize, usize)>> {
-    gutters
-        .edges
-        .iter()
-        .map(|edge| {
-            edge.map(|edge| {
-                let start = band_end[edge.start_gap] + bus_tracks[edge.start_gap] + edge.start_slot;
-                let end = band_end[edge.end_gap] + bus_tracks[edge.end_gap] + edge.end_slot;
-                (start, end)
-            })
-        })
-        .collect()
-}
-
 fn lane_spans(
-    graph: &Graph,
+    edges: &[Edge],
     ranks: &[usize],
     placed: &[Placed],
     vertical: bool,
 ) -> Vec<(usize, usize, usize, usize, usize)> {
-    graph
-        .edges
+    edges
         .iter()
         .enumerate()
         .filter(|(_, e)| e.from != e.to && ranks[e.to] != ranks[e.from] + 1)
@@ -2316,15 +2303,15 @@ fn place_td(
     max_rank: usize,
     by_rank: &[Vec<usize>],
     sizes: &NodeSizes,
-    graph: &Graph,
+    edges: &[Edge],
     placed: &mut [Placed],
 ) -> RoutePlan {
-    let centers = assign_positions(by_rank, &sizes.lay_w, GAP_X, &graph.edges, ranks);
+    let centers = assign_positions(by_rank, &sizes.lay_w, GAP_X, edges, ranks);
 
-    let mut edge_bus = vec![0usize; graph.edges.len()];
+    let mut edge_bus = vec![0usize; edges.len()];
     let mut bus_tracks = vec![0usize; max_rank + 1];
     for (r, tracks) in bus_tracks.iter_mut().enumerate().take(max_rank) {
-        let spans = bus_spans_td(graph, ranks, &centers, r, false);
+        let spans = bus_spans_td(edges, ranks, &centers, r, false);
         if spans.is_empty() {
             continue;
         }
@@ -2335,7 +2322,6 @@ fn place_td(
         *tracks = count;
     }
 
-    let gutters = plan_gutters(graph, ranks, max_rank);
     let rank_h: Vec<usize> = by_rank
         .iter()
         .map(|row| {
@@ -2347,9 +2333,7 @@ fn place_td(
         .collect();
     let mut rank_y = vec![0usize; max_rank + 1];
     for r in 1..=max_rank {
-        let gap_index = r - 1;
-        let tracks = bus_tracks[gap_index] + gutters.gap_tracks[gap_index];
-        let gap = GAP_Y.max(tracks + 1);
+        let gap = GAP_Y.max(bus_tracks[r - 1] + 1);
         rank_y[r] = rank_y[r - 1] + rank_h[r - 1] + gap;
     }
     let canvas_h = rank_y[max_rank] + rank_h[max_rank];
@@ -2380,7 +2364,7 @@ fn place_td(
     }
 
     let mut content_w = diagram_w;
-    for e in &graph.edges {
+    for e in edges {
         if e.from == e.to {
             continue;
         }
@@ -2394,9 +2378,8 @@ fn place_td(
         }
     }
 
-    let edge_gutters = gutter_coordinates(&gutters, &band_end, &bus_tracks);
-    let mut edge_lane = vec![0usize; graph.edges.len()];
-    let lanes = lane_spans(graph, ranks, placed, true);
+    let mut edge_lane = vec![0usize; edges.len()];
+    let lanes = lane_spans(edges, ranks, placed, true);
     let (canvas_w, lane_base) = if lanes.is_empty() {
         (content_w, 0)
     } else {
@@ -2411,7 +2394,6 @@ fn place_td(
         canvas: (canvas_w, canvas_h),
         band_end,
         edge_bus,
-        edge_gutters,
         lane_base,
         edge_lane,
     }
@@ -2422,7 +2404,7 @@ fn place_lr(
     max_rank: usize,
     by_rank: &[Vec<usize>],
     sizes: &NodeSizes,
-    graph: &Graph,
+    edges: &[Edge],
     placed: &mut [Placed],
 ) -> RoutePlan {
     let col_w: Vec<usize> = by_rank
@@ -2430,21 +2412,20 @@ fn place_lr(
         .map(|row| row.iter().map(|&i| sizes.box_w[i]).max().unwrap_or(0))
         .collect();
 
-    let max_label = graph
-        .edges
+    let max_label = edges
         .iter()
-        .filter(|edge| edge.from == edge.to || ranks[edge.to] > ranks[edge.from])
+        .filter(|e| e.from == e.to || ranks[e.to] == ranks[e.from] + 1)
         .filter_map(|e| e.label.as_ref().map(|l| l.width().min(MAX_LABEL)))
         .max()
         .unwrap_or(0);
     let base_gap = (GAP_X + 1).max(max_label + 3);
 
-    let centers = assign_positions(by_rank, &sizes.lay_h, 1, &graph.edges, ranks);
+    let centers = assign_positions(by_rank, &sizes.lay_h, 1, edges, ranks);
 
-    let mut edge_bus = vec![0usize; graph.edges.len()];
+    let mut edge_bus = vec![0usize; edges.len()];
     let mut bus_tracks = vec![0usize; max_rank + 1];
     for (r, tracks) in bus_tracks.iter_mut().enumerate().take(max_rank) {
-        let spans = bus_spans_td(graph, ranks, &centers, r, true);
+        let spans = bus_spans_td(edges, ranks, &centers, r, true);
         if spans.is_empty() {
             continue;
         }
@@ -2455,12 +2436,9 @@ fn place_lr(
         *tracks = count;
     }
 
-    let gutters = plan_gutters(graph, ranks, max_rank);
     let mut rank_x = vec![0usize; max_rank + 1];
     for r in 1..=max_rank {
-        let gap_index = r - 1;
-        let tracks = bus_tracks[gap_index] + gutters.gap_tracks[gap_index];
-        let gap = base_gap.max(tracks + max_label + 3);
+        let gap = base_gap.max(bus_tracks[r - 1] + max_label + 3);
         rank_x[r] = rank_x[r - 1] + col_w[r - 1] + gap;
     }
     let canvas_w = rank_x[max_rank]
@@ -2494,9 +2472,8 @@ fn place_lr(
         }
     }
 
-    let edge_gutters = gutter_coordinates(&gutters, &band_end, &bus_tracks);
-    let mut edge_lane = vec![0usize; graph.edges.len()];
-    let lanes = lane_spans(graph, ranks, placed, false);
+    let mut edge_lane = vec![0usize; edges.len()];
+    let lanes = lane_spans(edges, ranks, placed, false);
     let (canvas_h, lane_base) = if lanes.is_empty() {
         (diagram_h, 0)
     } else {
@@ -2511,7 +2488,6 @@ fn place_lr(
         canvas: (canvas_w, canvas_h),
         band_end,
         edge_bus,
-        edge_gutters,
         lane_base,
         edge_lane,
     }
@@ -2521,7 +2497,6 @@ struct RoutePlan {
     canvas: (usize, usize),
     band_end: Vec<usize>,
     edge_bus: Vec<usize>,
-    edge_gutters: Vec<Option<(usize, usize)>>,
     lane_base: usize,
     edge_lane: Vec<usize>,
 }
@@ -2921,47 +2896,6 @@ fn route_forward(canvas: &mut Canvas, from: &Placed, to: &Placed, edge: &Edge, b
     }
 }
 
-fn route_long_forward(
-    canvas: &mut Canvas,
-    from: &Placed,
-    to: &Placed,
-    edge: &Edge,
-    exit_row: usize,
-    entry_row: usize,
-    lane_x: usize,
-) {
-    let source_x = from.cx;
-    let source_bottom = from.y + from.h - 1;
-    let target_x = to.cx;
-    let head_row = to.y - 1;
-    debug_assert!(source_bottom < exit_row);
-    debug_assert!(exit_row < entry_row);
-    debug_assert!(entry_row <= head_row);
-
-    canvas.junction(source_x, source_bottom, D);
-    canvas.seg_v(source_x, source_bottom, exit_row);
-    canvas.seg_h(exit_row, source_x, lane_x);
-    canvas.seg_v(lane_x, exit_row, entry_row);
-    canvas.seg_h(entry_row, target_x, lane_x);
-    canvas.seg_v(target_x, entry_row, head_row);
-    if edge.head_to == Head::None {
-        canvas.add_bits(target_x, head_row, U);
-    } else {
-        canvas.set(target_x, head_row, head_glyph(edge.head_to, '▼'), Cls::Edge);
-    }
-    if edge.head_from != Head::None {
-        canvas.set(
-            source_x,
-            source_bottom,
-            head_glyph(edge.head_from, '▲'),
-            Cls::Edge,
-        );
-    }
-    if let Some(label) = &edge.label {
-        place_label(canvas, label, head_row, target_x + 1);
-    }
-}
-
 fn head_glyph(head: Head, arrow: char) -> char {
     match head {
         Head::Circle => 'o',
@@ -3060,47 +2994,6 @@ fn route_forward_lr(canvas: &mut Canvas, from: &Placed, to: &Placed, edge: &Edge
 
     if let Some(label) = &edge.label {
         place_label(canvas, label, ly.saturating_sub(1), bus + 1);
-    }
-}
-
-fn route_long_forward_lr(
-    canvas: &mut Canvas,
-    from: &Placed,
-    to: &Placed,
-    edge: &Edge,
-    exit_col: usize,
-    entry_col: usize,
-    lane_y: usize,
-) {
-    let source_right = from.x + from.w - 1;
-    let source_y = from.cy;
-    let target_y = to.cy;
-    let head_col = to.x - 1;
-    debug_assert!(source_right < exit_col);
-    debug_assert!(exit_col < entry_col);
-    debug_assert!(entry_col <= head_col);
-
-    canvas.junction(source_right, source_y, R);
-    canvas.seg_h(source_y, source_right, exit_col);
-    canvas.seg_v(exit_col, source_y, lane_y);
-    canvas.seg_h(lane_y, exit_col, entry_col);
-    canvas.seg_v(entry_col, target_y, lane_y);
-    canvas.seg_h(target_y, entry_col, head_col);
-    if edge.head_to == Head::None {
-        canvas.add_bits(head_col, target_y, R);
-    } else {
-        canvas.set(head_col, target_y, head_glyph(edge.head_to, '▶'), Cls::Edge);
-    }
-    if edge.head_from != Head::None {
-        canvas.set(
-            source_right,
-            source_y,
-            head_glyph(edge.head_from, '◄'),
-            Cls::Edge,
-        );
-    }
-    if let Some(label) = &edge.label {
-        place_label(canvas, label, target_y.saturating_sub(1), entry_col + 1);
     }
 }
 
@@ -4478,17 +4371,31 @@ mod tests {
     }
 
     #[test]
-    fn skip_edge_routes_around_intermediate_boxes() {
-        let out = plain("graph TD\n A --> B\n B --> C\n A --> C");
-        assert!(!out.contains('┼'), "no border corruption:\n{out}");
-        assert!(
-            !out.contains('◄'),
-            "forward skip edge must not masquerade as a back edge:\n{out}"
-        );
+    fn long_forward_edge_expands_into_adjacent_segments() {
+        let graph = parse_graph("graph TD\n A --> B\n B --> C\n A <-->|skip| C").unwrap();
+        let ranks = compute_ranks(&graph);
+        let Ok(layout) = expand_forward_edges(&graph, &ranks) else {
+            panic!("small graph must fit the routing-point cap");
+        };
+        let point = graph.nodes.len();
+
+        assert_eq!(layout.ranks[point], 1);
+        assert_eq!(layout.edges.len(), graph.edges.len() + 1);
+        let first = &layout.edges[2];
+        assert_eq!((first.from, first.to), (graph.index["A"], point));
+        assert_eq!(first.head_from, Head::Arrow);
+        assert_eq!(first.head_to, Head::None);
+        assert_eq!(first.label, None);
+        assert!(first.line == LineKind::Solid);
+        let last = &layout.edges[3];
+        assert_eq!((last.from, last.to), (point, graph.index["C"]));
+        assert_eq!(last.head_from, Head::None);
+        assert_eq!(last.head_to, Head::Arrow);
+        assert_eq!(last.label.as_deref(), Some("skip"));
     }
 
     #[test]
-    fn long_forward_edge_does_not_cross_sibling_nodes() {
+    fn routing_points_avoid_false_sibling_connections() {
         let out = plain(
             "graph TD\n P --> A\n P --> B\n P --> C\n A --> A1\n A1 --> A2\n A2 --> J\n B --> J",
         );
@@ -4496,24 +4403,14 @@ mod tests {
             .lines()
             .find(|line| line.contains("│ B ") && line.contains("│ C "))
             .unwrap();
-        let after_b = sibling_row.split_once("│ B │").map(|(_, tail)| tail);
-        assert!(after_b.is_some(), "B's border must remain intact:\n{out}");
         assert!(
-            !after_b.unwrap().contains('─'),
-            "B's long edge must leave through its rank gutter, not cross C:\n{out}"
-        );
-    }
-
-    #[test]
-    fn long_forward_edge_lr_uses_forward_gutters() {
-        let out = plain(
-            "graph LR\n P --> A\n P --> B\n P --> C\n A --> A1\n A1 --> A2\n A2 --> J\n B --> J",
+            sibling_row.contains("│ B │"),
+            "B's border was changed:\n{out}"
         );
         assert!(
-            !out.contains('▲'),
-            "forward edge must not enter J as a back edge:\n{out}"
+            !out.contains('◄'),
+            "forward edge became a back edge:\n{out}"
         );
-        assert!(out.contains("│ C │"), "long edge must not cross C:\n{out}");
     }
 
     #[test]
@@ -4531,16 +4428,39 @@ mod tests {
     }
 
     #[test]
-    fn lr_gutters_reserve_track_and_label_width() {
+    fn lr_tracks_reserve_label_width() {
         let out = plain(
-            "graph LR\n S --> M1 --> T1\n S --> M2 --> T2\n S --> M3 --> T3\n S --> M4 --> T4\n S ---|abcdefghijklmnopqrstuvwxyz01| T1\n S ---|abcdefghijklmnopqrstuvwxyz02| T2\n S ---|abcdefghijklmnopqrstuvwxyz03| T3\n S ---|abcdefghijklmnopqrstuvwxyz04| T4",
+            "graph LR\n S --> M1 --> T1\n S --> M2 --> T2\n S --> M3 --> T3\n S --> M4 --> T4\n S ---|abcdefghijklmnopqrstuvwx| T1\n S ---|abcdefghijklmnopqrstuvwy| T2\n S ---|abcdefghijklmnopqrstuvwz| T3\n S ---|abcdefghijklmnopqrstuvw0| T4",
         );
-        for suffix in ["01", "02", "03", "04"] {
+        for suffix in ["x", "y", "z", "0"] {
             assert!(
-                out.contains(&format!("abcdefghijklmnopqrstuvwxyz{suffix}")),
+                out.contains(&format!("abcdefghijklmnopqrstuvw{suffix}")),
                 "label {suffix} was clipped:\n{out}"
             );
         }
+    }
+
+    #[test]
+    fn imgcat_pipeline_has_no_false_junctions() {
+        let out = plain(include_str!("../examples/imgcat-pipeline.txt"));
+        assert!(!out.contains('┼'), "unrelated routes crossed:\n{out}");
+        assert!(
+            !out.contains('◄'),
+            "forward route became a back edge:\n{out}"
+        );
+    }
+
+    #[test]
+    fn routing_point_cap_falls_back() {
+        let mut source = String::from("flowchart TD\n");
+        for index in 0..127 {
+            source.push_str(&format!(" N{index} --> N{}\n", index + 1));
+        }
+        for _ in 0..33 {
+            source.push_str(" N0 --> N127\n");
+        }
+        let out = plain(&source);
+        assert!(out.contains("mermaid: flowchart"), "{out}");
     }
 
     fn ordered_ranks(src: &str) -> (Graph, Vec<usize>, Vec<Vec<usize>>) {
