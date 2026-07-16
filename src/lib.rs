@@ -57,6 +57,7 @@ const MAX_ROUTING_POINTS: usize = 4096;
 const MAX_GROUPS: usize = 24;
 const MAX_GROUP_DEPTH: usize = 6;
 const MAX_CANVAS_CELLS: usize = 1 << 21;
+const MAX_FALLBACK_WIDTH: usize = 1000;
 
 fn char_width(c: char) -> usize {
     UnicodeWidthChar::width(c).unwrap_or(0)
@@ -1134,29 +1135,27 @@ fn push_member(info: &mut ClassInfo, raw: &str) {
 fn parse_class_relation(
     st: &str,
 ) -> Option<(String, String, Head, Head, LineKind, Option<String>)> {
-    let chars: Vec<char> = st.chars().collect();
     let mut found: Option<(usize, &str, Head, Head, LineKind)> = None;
-    'outer: for pos in 0..chars.len() {
+    let mut previous = None;
+    'outer: for (byte, character) in st.char_indices() {
         for &(op, hf, ht, line) in CLASS_OPS {
-            if st[char_byte(st, pos)..].starts_with(op) {
-                if op.starts_with('o') && pos > 0 && is_id_char(chars[pos - 1]) {
+            if st[byte..].starts_with(op) {
+                if op.starts_with('o') && previous.is_some_and(is_id_char) {
                     continue;
                 }
-                if op.ends_with('o')
-                    && chars
-                        .get(pos + op.chars().count())
-                        .is_some_and(|&c| is_id_char(c))
+                if op.ends_with('o') && st[byte + op.len()..].chars().next().is_some_and(is_id_char)
                 {
                     continue;
                 }
-                found = Some((pos, op, hf, ht, line));
+                found = Some((byte, op, hf, ht, line));
                 break 'outer;
             }
         }
+        previous = Some(character);
     }
-    let (pos, op, head_from, head_to, line) = found?;
-    let lhs = st[..char_byte(st, pos)].trim();
-    let rhs = st[char_byte(st, pos) + op.len()..].trim();
+    let (byte, op, head_from, head_to, line) = found?;
+    let lhs = st[..byte].trim();
+    let rhs = st[byte + op.len()..].trim();
 
     let (lhs, card_from) = strip_cardinality_suffix(lhs);
     let (rhs, card_to) = strip_cardinality_prefix(rhs);
@@ -1187,13 +1186,6 @@ fn parse_class_relation(
         line,
         label,
     ))
-}
-
-fn char_byte(s: &str, char_pos: usize) -> usize {
-    s.char_indices()
-        .nth(char_pos)
-        .map(|(b, _)| b)
-        .unwrap_or(s.len())
 }
 
 fn strip_cardinality_suffix(s: &str) -> (&str, String) {
@@ -3612,14 +3604,31 @@ fn fallback(
     too_wide: bool,
 ) -> MermaidArt {
     let header = first_word(src);
-    let limit = max_width.map(|width| width.saturating_sub(4).max(1));
-    let title = fit_label(&format!(" mermaid: {header} "), limit.unwrap_or(usize::MAX));
-    let body: Vec<String> = src
+    let content_width_max = max_width
+        .map(|width| width.saturating_sub(4).max(1))
+        .unwrap_or(MAX_FALLBACK_WIDTH)
+        .min(MAX_FALLBACK_WIDTH);
+    let limit = Some(content_width_max);
+    let title = fit_label(&format!(" mermaid: {header} "), content_width_max);
+    let hint = if too_wide {
+        wrap_words(TOO_WIDE_HINT, limit)
+    } else {
+        Vec::new()
+    };
+    let body_rows_max = (MAX_CANVAS_CELLS / (content_width_max + 4))
+        .saturating_sub(2)
+        .saturating_sub(hint.len());
+    let mut chunks = src
         .lines()
-        .map(|l| l.trim_end())
-        .skip_while(|l| l.is_empty())
-        .flat_map(|l| chunk_line(l, limit))
-        .collect();
+        .map(|line| line.trim_end())
+        .skip_while(|line| line.is_empty())
+        .flat_map(|line| chunk_line(line, limit));
+    let mut body: Vec<String> = chunks.by_ref().take(body_rows_max).collect();
+    if chunks.next().is_some()
+        && let Some(last) = body.last_mut()
+    {
+        *last = "…".to_string();
+    }
     let content_w = body
         .iter()
         .map(|l| l.width())
@@ -3663,7 +3672,7 @@ fn fallback(
 
     if too_wide {
         let hint_style = styles.border.add_modifier(Modifier::ITALIC);
-        for chunk in wrap_words(TOO_WIDE_HINT, max_width) {
+        for chunk in hint {
             styled.push(Line::from(Span::styled(chunk.clone(), hint_style)));
             plain.push(chunk);
         }
@@ -4623,6 +4632,18 @@ mod tests {
     }
 
     #[test]
+    fn fallback_without_width_has_bounded_output() {
+        let source = format!("pie\n{}\n{}", "x".repeat(2048), "y\n".repeat(2048));
+        let out = render(&source, &styles(), None).unwrap().plain_lines;
+        let cells: usize = out.iter().map(|line| line.width()).sum();
+        assert!(cells <= MAX_CANVAS_CELLS, "fallback has {cells} cells");
+        assert!(
+            out.iter()
+                .all(|line| line.width() <= MAX_FALLBACK_WIDTH + 4)
+        );
+    }
+
+    #[test]
     fn class_renders_compartments() {
         let out = plain(
             "classDiagram\n class Animal {\n +int age\n +isMammal() bool\n }\n Animal <|-- Duck",
@@ -4730,6 +4751,11 @@ mod tests {
     fn class_unknown_statement_falls_back() {
         let out = plain("classDiagram\n A --> B\n total garbage here");
         assert!(out.contains("mermaid: classDiagram"), "{out}");
+    }
+
+    #[test]
+    fn long_malformed_class_relation_is_rejected() {
+        assert!(parse_class_relation(&"a".repeat(32 * 1024)).is_none());
     }
 
     #[test]

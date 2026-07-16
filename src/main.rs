@@ -58,7 +58,7 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Options, Strin
                 options.width = Some(parse_width(&value)?);
             }
             Some(value) if parse_options && value.starts_with('-') && value != "-" => {
-                return Err(format!("unknown option: {value}"));
+                return Err(format!("unknown option: {value:?}"));
             }
             _ => set_input(&mut options, PathBuf::from(argument))?,
         }
@@ -72,7 +72,7 @@ fn parse_width(value: &OsString) -> Result<usize, String> {
         .ok_or_else(|| "width is not valid UTF-8".to_string())?;
     let width = value
         .parse::<usize>()
-        .map_err(|_| format!("invalid width: {value}"))?;
+        .map_err(|_| format!("invalid width: {value:?}"))?;
     if (WIDTH_MIN..=WIDTH_MAX).contains(&width) {
         Ok(width)
     } else {
@@ -93,7 +93,7 @@ fn read_source(path: Option<PathBuf>) -> Result<String, String> {
         None => read_bounded(io::stdin().lock()),
         Some(path) if path.as_os_str() == "-" => read_bounded(io::stdin().lock()),
         Some(path) => {
-            let file = File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+            let file = File::open(path).map_err(|error| format!("{path:?}: {error}"))?;
             read_bounded(file)
         }
     }
@@ -157,6 +157,13 @@ mod tests {
             parse_args(args(&["--", "--diagram.mmd"])).unwrap().input,
             Some(PathBuf::from("--diagram.mmd"))
         );
+    }
+
+    #[test]
+    fn escapes_controls_in_invalid_width() {
+        let error = parse_args(args(&["--width", "\u{1b}[31m"])).unwrap_err();
+        assert!(!error.contains('\u{1b}'));
+        assert!(error.contains("\\u{1b}"));
     }
 
     #[test]
