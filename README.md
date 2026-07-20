@@ -1,43 +1,77 @@
 # mermaid-ascii
 
-Render Mermaid source as terminal-safe Unicode art. Reads one file or stdin and writes plain text to stdout.
+Turn [Mermaid](https://mermaid.js.org/) diagrams into clean ASCII art for your terminal.
 
 ```sh
-printf 'flowchart LR\nA[Source] --> B[Output]\n' | mermaid-ascii --width 80
-mermaid-ascii diagram.mmd
+printf 'flowchart LR\nA[Source] --> B[Render] --> C[Terminal]\n' | mermaid-ascii
 ```
 
-Supported: flowchart, sequence, state, class, and entity-relationship diagrams. Unsupported syntax is shown in a framed source fallback.
+```
 
-## Examples
+┌────────┐    ┌────────┐    ┌──────────┐
+│ Source ├───▶│ Render ├───▶│ Terminal │
+└────────┘    └────────┘    └──────────┘
+```
 
-[`examples/`](examples/) includes the examples from Simon Willison's [grok-mermaid](https://github.com/simonw/tools/blob/cfa72d42d7c7a06d9ad62ee8fdcea16ba634db7d/grok-mermaid.html#L141-L191), used under its [Apache-2.0 license](https://github.com/simonw/tools/blob/cfa72d42d7c7a06d9ad62ee8fdcea16ba634db7d/LICENSE). Render one with `mermaid-ascii examples/flowchart.mmd`.
+Reads a file or stdin, writes plain text to stdout. Handles flowchart, sequence,
+state, class, and entity-relationship diagrams. Anything else is printed as-is in
+a framed box.
 
-## Build
+## Install
 
-Build for the host with `cargo build --release`.
+```sh
+cargo install --path .
+```
 
-For a static x86-64 Linux binary, install `musl-gcc`, then run:
+For a standalone binary with no system dependencies:
 
 ```sh
 rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl
+# binary: target/x86_64-unknown-linux-musl/release/mermaid-ascii
 ```
 
-Binary: `target/x86_64-unknown-linux-musl/release/mermaid-ascii`.
+## Usage
+
+```sh
+mermaid-ascii diagram.mmd          # from a file
+cat diagram.mmd | mermaid-ascii    # from stdin
+mermaid-ascii --width 80 d.mmd     # cap the output width
+```
+
+Ready-made diagrams to try live in [`examples/`](examples/):
+
+```sh
+mermaid-ascii examples/flowchart.mmd
+```
 
 ## Library
 
-`render` also returns styled `ratatui::text::Line` values for TUI use and plain Unicode lines for CLI use.
+`mermaid-ascii` is also a Rust library. `render` returns plain Unicode lines for a
+CLI, or styled [`ratatui`](https://ratatui.rs/) lines for a TUI.
 
-## Origin and differences
+## Why
 
-Terminal renderer adapted from [xAI's `grok-build`](https://github.com/xai-org/grok-build/blob/c68e39f60462f28d9be5e683d9cbe2c57b1a5027/crates/codegen/xai-grok-markdown/src/mermaid.rs), used under its [Apache-2.0 license](https://github.com/xai-org/grok-build/blob/c68e39f60462f28d9be5e683d9cbe2c57b1a5027/LICENSE).
+Inspired by Simon Willison's [_Grok 4 can render Mermaid diagrams as ASCII art_](https://simonwillison.net/2026/Jul/16/grok-mermaid/).
 
-Compared with that revision, this package:
+Coding agents write Mermaid well but draw ASCII art badly. Let them write Mermaid
+and have this render it.
 
-- extracts the terminal renderer into a standalone library and stdin/file CLI;
-- sanitizes terminal control characters, caps CLI input, and bounds parsing, layout, and fallback output;
-- supports native builds plus an explicit static x86-64 musl build;
-- normalizes long forward edges with bounded, invisible Sugiyama routing points instead of exterior back-edge lanes;
-- excludes the markdown streaming, pager UI, PNG worker/cache, and settings integration.
+## Credits
+
+- Forked from the renderer in [xAI's `grok-build`](https://github.com/xai-org/grok-build/blob/c68e39f60462f28d9be5e683d9cbe2c57b1a5027/crates/codegen/xai-grok-markdown/src/mermaid.rs) (Apache-2.0). Thanks to the xAI team.
+- Example diagrams from Simon Willison's [`tools`](https://github.com/simonw/tools/blob/cfa72d42d7c7a06d9ad62ee8fdcea16ba634db7d/grok-mermaid.html#L141-L191) (Apache-2.0).
+
+## What this fork changes
+
+Starting from grok-build's renderer at commit [`c68e39f`](https://github.com/xai-org/grok-build/tree/c68e39f60462f28d9be5e683d9cbe2c57b1a5027), and building on top of it, this fork:
+
+- pulls the renderer out into a standalone library plus a small file/stdin CLI (grok-build embeds it in a larger markdown system);
+- hardens it for untrusted input by stripping terminal control characters, capping input size, and bounding the parsing and layout work;
+- adds a static x86-64 Linux (musl) build;
+- improves routing of long edges so connectors stay inside the diagram instead of looping around the outside;
+- drops the grok-build parts it doesn't need: markdown streaming, the pager UI, PNG rendering, and settings.
+
+## License
+
+Apache-2.0. See [`LICENSE`](LICENSE).

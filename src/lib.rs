@@ -3595,7 +3595,7 @@ fn draw_seq_text(canvas: &mut Canvas, text: &str, x: usize, y: usize, cls: Cls) 
 }
 
 const TOO_WIDE_HINT: &str =
-    "This diagram is too wide to display here \u{2014} open the image to view it in full.";
+    "This diagram is too wide to render at this width; try a larger --width.";
 
 fn fallback(
     src: &str,
@@ -4303,8 +4303,8 @@ mod tests {
             .expect("note row");
         assert!(note > bottom, "note must be below the box:\n{joined}");
         assert!(
-            joined.contains("open the image"),
-            "note points at the image:\n{joined}"
+            joined.contains("larger --width"),
+            "note suggests a larger width:\n{joined}"
         );
 
         assert!(

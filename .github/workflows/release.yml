@@ -1,0 +1,83 @@
+name: release
+
+# Only run on x.y.z tags.
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    name: create-release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ env.VERSION }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get the release version from the tag
+        run: echo "VERSION=${{ github.ref_name }}" >> "$GITHUB_ENV"
+      - name: Check tag matches Cargo.toml version
+        run: |
+          if ! grep -q "^version *= *\"$VERSION\"" Cargo.toml; then
+            echo "tag $VERSION does not match Cargo.toml version" >&2
+            exit 1
+          fi
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$VERSION" --draft --verify-tag --title "$VERSION"
+
+  build-release:
+    name: build-release (${{ matrix.target }})
+    needs: [create-release]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+          - target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl tools
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build archive
+        run: |
+          version="${{ needs.create-release.outputs.version }}"
+          archive="mermaid-ascii-$version-${{ matrix.target }}"
+          mkdir -p "$archive"
+          cp "target/${{ matrix.target }}/release/mermaid-ascii" "$archive/"
+          cp README.md LICENSE "$archive/"
+          tar czf "$archive.tar.gz" "$archive"
+          shasum -a 256 "$archive.tar.gz" > "$archive.tar.gz.sha256"
+          echo "ASSET=$archive.tar.gz" >> "$GITHUB_ENV"
+          echo "ASSET_SUM=$archive.tar.gz.sha256" >> "$GITHUB_ENV"
+
+      - name: Upload release archive
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${{ needs.create-release.outputs.version }}"
+          gh release upload "$version" "$ASSET" "$ASSET_SUM"
