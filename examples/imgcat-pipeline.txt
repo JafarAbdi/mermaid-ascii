@@ -1,0 +1,25 @@
+flowchart TD
+  CM[CursorMoved / InsertEnter] --> DB[debounce 50ms norm / 300ms ins]
+  DB --> UP[update: bump render_id]
+  UP --> DET[detect_at_cursor: async TS parse]
+  DET --> INS[inspect_trees: for_each_tree]
+  INS --> PR{priority match}
+  PR -->|latex 3 / 2| LX[kind=latex]
+  PR -->|python :math:| LX
+  PR -->|image| IM[kind=image]
+  PR -->|mermaid fence| MM[kind=mermaid]
+  PR -->|none| CL[close float]
+  LX --> HL[latex_with_highlight]
+  HL --> RL[render_latex: typst + mitex]
+  MM --> RM[render_mermaid: mmdr]
+  RL --> RP[render_to_png]
+  RM --> RP
+  RP --> CACHE{FNV-1a cache hit?}
+  CACHE -->|yes| PNG[PNG path]
+  CACHE -->|no| WR[write temp, run cmd, unlink]
+  WR --> PNG
+  IM --> PLACE[place]
+  PNG --> PLACE
+  PLACE --> TX[Kitty transmit: t=f base64 path]
+  TX --> WIN[open float win, anchor top-right]
+  WIN --> RNDR[render: Kitty a=p at float pos]

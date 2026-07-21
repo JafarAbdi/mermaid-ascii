@@ -1,0 +1,8 @@
+graph TD
+  Start[Request received] --> Auth{Authenticated?}
+  Auth -->|yes| Rate{Rate limit OK?}
+  Auth -->|no| R401[401 Unauthorized]
+  Rate -->|yes| H(Handle request)
+  Rate -->|no| R429[429 Too Many Requests]
+  H -.-> Log[Audit log]
+  H ==> Resp[200 OK]

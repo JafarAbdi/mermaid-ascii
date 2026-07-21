@@ -1,0 +1,18 @@
+[advisories]
+version = 2
+yanked  = "deny"
+
+[bans]
+multiple-versions = "warn"
+wildcards         = "deny"
+
+[licenses]
+version = 2
+# Allow the permissive licenses used across our dependency tree.
+allow                = ["Apache-2.0", "MIT"]
+confidence-threshold = 0.9
+
+[sources]
+unknown-registry = "deny"
+unknown-git      = "deny"
+allow-registry   = ["https://github.com/rust-lang/crates.io-index"]

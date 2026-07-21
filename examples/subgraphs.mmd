@@ -1,0 +1,8 @@
+flowchart LR
+  subgraph Client
+    UI[Browser UI] --> SW[Service worker]
+  end
+  subgraph Server
+    API[API gateway] --> DB[Postgres]
+  end
+  SW -->|HTTPS| API
