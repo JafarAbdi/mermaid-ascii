@@ -20,7 +20,7 @@ jobs:
     outputs:
       version: ${{ env.VERSION }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Get the release version from the tag
         run: echo "VERSION=${{ github.ref_name }}" >> "$GITHUB_ENV"
       - name: Check tag matches Cargo.toml version
@@ -45,7 +45,7 @@ jobs:
           - target: x86_64-unknown-linux-musl
           - target: x86_64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install musl tools
         if: endsWith(matrix.target, '-musl')
