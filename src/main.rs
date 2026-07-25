@@ -30,8 +30,56 @@ fn run(args: impl Iterator<Item = OsString>) -> Result<(), String> {
     }
 
     let source = read_source(options.input)?;
-    let lines = render(&source, options.width).ok_or_else(|| "input is empty".to_string())?;
+    let width = effective_width(options.width, stdout_columns)?;
+    let lines = render(&source, width).ok_or_else(|| "input is empty".to_string())?;
     write_stdout(&format_output(&lines))
+}
+
+fn effective_width(
+    explicit: Option<usize>,
+    detect: impl FnOnce() -> Result<Option<usize>, String>,
+) -> Result<Option<usize>, String> {
+    match explicit {
+        Some(width) => Ok(Some(width)),
+        None => detect(),
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn reported_width(columns: u16) -> Result<usize, String> {
+    if columns == 0 {
+        Err("terminal reported zero columns".to_string())
+    } else {
+        Ok(usize::from(columns).min(WIDTH_MAX))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn stdout_columns() -> Result<Option<usize>, String> {
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: `size` is initialized and writable for the duration of the ioctl call.
+    let status = unsafe {
+        libc::ioctl(
+            libc::STDOUT_FILENO,
+            libc::TIOCGWINSZ,
+            std::ptr::addr_of_mut!(size),
+        )
+    };
+    if status == -1 {
+        Ok(None)
+    } else {
+        reported_width(size.ws_col).map(Some)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn stdout_columns() -> Result<Option<usize>, String> {
+    Ok(None)
 }
 
 /// Join rendered lines for stdout, dropping blank leading and trailing lines
@@ -174,6 +222,45 @@ mod tests {
         let error = parse_args(args(&["--width", "\u{1b}[31m"])).unwrap_err();
         assert!(!error.contains('\u{1b}'));
         assert!(error.contains("\\u{1b}"));
+    }
+
+    #[test]
+    fn explicit_width_skips_detection() {
+        assert_eq!(
+            effective_width(Some(80), || panic!("detection must not run")),
+            Ok(Some(80))
+        );
+    }
+
+    #[test]
+    fn unavailable_width_is_unrestricted() {
+        assert_eq!(effective_width(None, || Ok(None)), Ok(None));
+    }
+
+    #[test]
+    fn accepts_narrow_reported_width() {
+        assert_eq!(reported_width(3), Ok(3));
+    }
+
+    #[test]
+    fn caps_reported_width() {
+        assert_eq!(reported_width(u16::MAX), Ok(WIDTH_MAX));
+    }
+
+    #[test]
+    fn propagates_detection_error() {
+        assert_eq!(
+            effective_width(None, || Err("detection failed".to_string())),
+            Err("detection failed".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_zero_reported_width() {
+        assert_eq!(
+            reported_width(0),
+            Err("terminal reported zero columns".to_string())
+        );
     }
 
     #[test]
