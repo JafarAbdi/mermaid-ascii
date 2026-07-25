@@ -1,14 +1,16 @@
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use mermaid_ascii::render;
+use terminal_size::{Width, terminal_size};
 
 const INPUT_BYTES_MAX: u64 = 1024 * 1024;
 const WIDTH_MIN: usize = 10;
 const WIDTH_MAX: usize = 1000;
+const TERMINAL_WIDTH_MARGIN: usize = 2;
 
 fn main() -> ExitCode {
     match run(std::env::args_os().skip(1)) {
@@ -30,8 +32,26 @@ fn run(args: impl Iterator<Item = OsString>) -> Result<(), String> {
     }
 
     let source = read_source(options.input)?;
-    let lines = render(&source, options.width).ok_or_else(|| "input is empty".to_string())?;
+    let width = resolve_width(options.width, stdout_width());
+    let lines = render(&source, width).ok_or_else(|| "input is empty".to_string())?;
     write_stdout(&format_output(&lines))
+}
+
+fn stdout_width() -> Option<usize> {
+    if !io::stdout().is_terminal() {
+        return None;
+    }
+    terminal_size().map(|(Width(columns), _)| usize::from(columns))
+}
+
+fn resolve_width(explicit: Option<usize>, terminal_columns: Option<usize>) -> Option<usize> {
+    explicit.or_else(|| {
+        terminal_columns.map(|columns| {
+            columns
+                .saturating_sub(TERMINAL_WIDTH_MARGIN)
+                .clamp(WIDTH_MIN, WIDTH_MAX)
+        })
+    })
 }
 
 /// Join rendered lines for stdout, dropping blank leading and trailing lines
@@ -174,6 +194,24 @@ mod tests {
         let error = parse_args(args(&["--width", "\u{1b}[31m"])).unwrap_err();
         assert!(!error.contains('\u{1b}'));
         assert!(error.contains("\\u{1b}"));
+    }
+
+    #[test]
+    fn explicit_width_wins_over_terminal_width() {
+        assert_eq!(resolve_width(Some(80), Some(120)), Some(80));
+    }
+
+    #[test]
+    fn terminal_width_has_margin_and_bounds() {
+        assert_eq!(resolve_width(None, Some(80)), Some(78));
+        assert_eq!(resolve_width(None, Some(10)), Some(10));
+        assert_eq!(resolve_width(None, Some(2)), Some(WIDTH_MIN));
+        assert_eq!(resolve_width(None, Some(2000)), Some(WIDTH_MAX));
+    }
+
+    #[test]
+    fn redirected_output_is_unrestricted() {
+        assert_eq!(resolve_width(None, None), None);
     }
 
     #[test]

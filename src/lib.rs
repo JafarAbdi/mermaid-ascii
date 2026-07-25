@@ -3504,8 +3504,7 @@ fn draw_seq_text(canvas: &mut Canvas, text: &str, x: usize, y: usize, cls: Cls) 
     }
 }
 
-const TOO_WIDE_HINT: &str =
-    "This diagram is too wide to render at this width; try a larger --width.";
+const TOO_WIDE_HINT: &str = "This diagram is too wide to render at this width.";
 
 fn fallback(src: &str, max_width: Option<usize>, too_wide: bool) -> Vec<String> {
     let header = first_word(src);
@@ -4151,8 +4150,9 @@ mod tests {
             .expect("note row");
         assert!(note > bottom, "note must be below the box:\n{joined}");
         assert!(
-            joined.contains("larger --width"),
-            "note suggests a larger width:\n{joined}"
+            joined.contains("This diagram is too wide to render")
+                && joined.contains("at this width."),
+            "note describes the width limit:\n{joined}"
         );
 
         assert!(

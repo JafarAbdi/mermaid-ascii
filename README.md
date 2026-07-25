@@ -12,9 +12,11 @@ printf 'flowchart LR\nA[Source] --> B[Render] --> C[Terminal]\n' | mermaid-ascii
 └────────┘    └────────┘    └──────────┘
 ```
 
-Reads a file or stdin, writes plain text to stdout. Supported diagrams: flowchart,
-sequence, state, class, and entity-relationship. Anything else is shown as-is in a
-framed box.
+Reads a file or stdin and writes plain text to stdout. When stdout is a terminal,
+its detected width (with a small safety margin) limits the rendering. Use `--width`
+to override it. Piped or redirected output has no width limit. Supported diagrams:
+flowchart, sequence, state, class, and entity-relationship. Anything else is shown
+as-is in a framed box.
 
 ## Install
 
@@ -27,7 +29,7 @@ source with `cargo install --path .`.
 ```sh
 mermaid-ascii diagram.mmd              # from a file
 cat diagram.mmd | mermaid-ascii        # from stdin
-mermaid-ascii --width 80 diagram.mmd   # cap the output width
+mermaid-ascii --width 80 diagram.mmd   # explicitly cap the output width
 mermaid-ascii examples/flowchart.mmd   # try a bundled example
 ```
 

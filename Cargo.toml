@@ -11,6 +11,7 @@ keywords     = ["mermaid", "diagram", "ascii", "terminal", "cli"]
 categories   = ["command-line-utilities", "visualization"]
 
 [dependencies]
+terminal_size = "0.4"
 unicode-width = "0.2"
 
 [profile.release]
